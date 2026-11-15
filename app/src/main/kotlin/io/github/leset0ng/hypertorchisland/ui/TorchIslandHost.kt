@@ -85,6 +85,7 @@ internal class TorchIslandHostView(
     private val isExpandedState: (View) -> Boolean,
     private val onReleaseTouch: () -> Unit,
     private val onCollapsedWithLayout: (View) -> Unit,
+    private val onExpandedLayout: (View) -> Unit,
     private val logError: (String, Throwable) -> Unit,
 ) : FrameLayout(pluginContext) {
 
@@ -189,6 +190,7 @@ internal class TorchIslandHostView(
             addView(layout)
             activeFlashlightLayout = layout
             collapseNotifiedForCurrentAttach = false
+            layout.post { onExpandedLayout(layout) }
         } catch (t: Throwable) {
             logError("Failed to attach native MiFlashlightLayout", t)
         }

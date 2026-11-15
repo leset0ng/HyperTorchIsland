@@ -92,6 +92,8 @@ internal data class PluginTargets(
     val onIslandClickMethod: Method,
     val contentFakeViewClass: Class<*>,
     val stateExpandedClass: Class<*>,
+    val stateBigIslandClass: Class<*>,
+    val stateShowOnceBigIslandClass: Class<*>,
     val touchInteractorClass: Class<*>,
     val onInterceptTouchEventMethod: Method,
     val touchInitXField: Field,
@@ -109,6 +111,11 @@ internal data class PluginTargets(
     val windowViewClass: Class<*>,
     val getCurrentExpandedStateMethod: Method,
     val getCurrentBigIslandStateMethod: Method,
+    val getEventCoordinatorMethod: Method,
+    val setUserExpandedMethod: Method,
+    val getUserExpandedMethod: Method,
+    val handleExpandGestureListenerMethod: Method,
+    val coordinatorGetWindowViewMethod: Method,
     val safeguardsDelayCollapsedMethod: Method?,
     val safeguardsWindowViewField: Field,
     val islandPropertyUpdaterClass: Class<*>,
@@ -382,6 +389,16 @@ internal object PluginTargetResolver {
             false,
             pluginLoader,
         )
+        val stateBigIslandClass = Class.forName(
+            "miui.systemui.dynamicisland.event.DynamicIslandState\$BigIsland",
+            false,
+            pluginLoader,
+        )
+        val stateShowOnceBigIslandClass = Class.forName(
+            "miui.systemui.dynamicisland.event.DynamicIslandState\$ShowOnceBigIsland",
+            false,
+            pluginLoader,
+        )
 
         val touchInteractorClass = Class.forName(
             "miui.systemui.dynamicisland.touch.domain.interactor.DynamicIslandTouchInteractor",
@@ -433,6 +450,22 @@ internal object PluginTargetResolver {
         )
         val getCurrentExpandedStateMethod = windowViewClass.getMethod("getCurrentExpandedState")
         val getCurrentBigIslandStateMethod = windowViewClass.getMethod("getCurrentBigIslandState")
+
+        // Tapping outside the island only collapses it while getUserExpanded() is true. The auto
+        // expanded flashlight island must behave like a user expanded one to stay dismissible.
+        val getEventCoordinatorMethod = baseContentViewClass.getMethod("getDynamicIslandEventCoordinator")
+        val setUserExpandedMethod = eventCoordinatorClass.getMethod(
+            "setUserExpanded",
+            Boolean::class.javaPrimitiveType,
+        )
+        val getUserExpandedMethod = eventCoordinatorClass.getMethod("getUserExpanded")
+        // Registers the system gesture monitor that reports outside taps back to maybeCollapseExpand().
+        // The stock expanded region is only non empty for a user opened island, so we push our own.
+        val handleExpandGestureListenerMethod = eventCoordinatorClass.getMethod(
+            "handleExpandGestureListener",
+            android.graphics.Region::class.java,
+        )
+        val coordinatorGetWindowViewMethod = eventCoordinatorClass.getMethod("getWindowView")
 
         // Auto collapse timer: expanded islands collapse after `expandedTime` seconds unless the user
         // interacted. The flashlight island should stay expanded while the torch is on, so we skip it.
@@ -539,6 +572,8 @@ internal object PluginTargetResolver {
             onIslandClickMethod = onIslandClickMethod,
             contentFakeViewClass = contentFakeViewClass,
             stateExpandedClass = stateExpandedClass,
+            stateBigIslandClass = stateBigIslandClass,
+            stateShowOnceBigIslandClass = stateShowOnceBigIslandClass,
             touchInteractorClass = touchInteractorClass,
             onInterceptTouchEventMethod = onInterceptTouchEventMethod,
             touchInitXField = touchInitXField,
@@ -556,6 +591,11 @@ internal object PluginTargetResolver {
             windowViewClass = windowViewClass,
             getCurrentExpandedStateMethod = getCurrentExpandedStateMethod,
             getCurrentBigIslandStateMethod = getCurrentBigIslandStateMethod,
+            getEventCoordinatorMethod = getEventCoordinatorMethod,
+            setUserExpandedMethod = setUserExpandedMethod,
+            getUserExpandedMethod = getUserExpandedMethod,
+            handleExpandGestureListenerMethod = handleExpandGestureListenerMethod,
+            coordinatorGetWindowViewMethod = coordinatorGetWindowViewMethod,
             safeguardsDelayCollapsedMethod = safeguardsDelayCollapsedMethod,
             safeguardsWindowViewField = safeguardsWindowViewField,
             islandPropertyUpdaterClass = propertyUpdaterClass,

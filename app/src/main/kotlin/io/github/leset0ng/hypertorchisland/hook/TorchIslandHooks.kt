@@ -219,8 +219,7 @@ internal class TorchIslandHooks(
 
             val state = targets.getStateMethod.invoke(baseContentView)
             val lastState = targets.getLastStateMethod.invoke(baseContentView)
-            val expandingOrExpanded = targets.stateExpandedClass.isInstance(state) ||
-                targets.stateExpandedClass.isInstance(lastState)
+            val expandingOrExpanded = isExpandedLike(targets, state) || isExpandedLike(targets, lastState)
             if (!expandingOrExpanded) return@install stock
 
             val top = chain.getArg(0) as Float
@@ -243,12 +242,57 @@ internal class TorchIslandHooks(
         }
     }
 
+    private fun markAsUserExpanded(targets: PluginTargets, contentView: View) {
+        val state = runCatching { targets.getStateMethod.invoke(contentView) }.getOrNull() ?: return
+        if (!isExpandedLike(targets, state)) return
+        val coordinator = runCatching { targets.getEventCoordinatorMethod.invoke(contentView) }.getOrNull()
+            ?: return
+        val alreadyExpanded = runCatching {
+            targets.getUserExpandedMethod.invoke(coordinator) as? Boolean
+        }.getOrNull() ?: false
+        if (alreadyExpanded) return
+        // Tapping outside the island only collapses it when getUserExpanded() is true, so the auto
+        // expanded flashlight island has to be flagged as user expanded to stay dismissible.
+        runCatching { targets.setUserExpandedMethod.invoke(coordinator, true) }
+            .onFailure { t -> logError("Failed to mark flashlight island as user expanded", t) }
+
+        // A user opened island also registers the outside tap monitor through its expanded region.
+        // The auto expanded one has no expanded region yet, so push it after the next layout pass.
+        contentView.post { updateOutsideTapMonitor(targets, contentView, true) }
+    }
+
+    private fun updateOutsideTapMonitor(targets: PluginTargets, contentView: View, enable: Boolean) {
+        runCatching {
+            val coordinator = targets.getEventCoordinatorMethod.invoke(contentView) as? Any ?: return
+            val region = android.graphics.Region()
+            if (enable) {
+                val rect = android.graphics.Rect()
+                if (!contentView.getGlobalVisibleRect(rect) || rect.isEmpty) return
+                region.set(rect)
+            }
+            targets.handleExpandGestureListenerMethod.invoke(coordinator, region)
+        }.onFailure { t -> logError("Failed to update outside tap monitor", t) }
+    }
+
+    private fun findContentView(view: View?): View? {
+        var current = view
+        while (current != null) {
+            val targets = pluginTargets
+            if (targets != null && targets.baseContentViewClass.isInstance(current)) return current
+            val parent = current.parent
+            current = parent as? View
+        }
+        return null
+    }
+
     private fun installTouchAndClickHooks(targets: PluginTargets) {
         hooks.install(targets.onIslandClickMethod, "plugin.contentView.onIslandClick") { chain ->
             val contentView = chain.thisObject
             val state = targets.getStateMethod.invoke(contentView)
             val data = targets.getCurrentIslandDataMethod.invoke(contentView)
-            if (targets.stateExpandedClass.isInstance(state) && isFlashlightIsland(targets, data)) {
+            if (isExpandedLike(targets, state) && isFlashlightIsland(targets, data) &&
+                isIslandCurrentlyExpanded(targets, contentView as? View)
+            ) {
                 // Keep the user inside the expanded torch island instead of launching MiFlashlightActivity.
                 return@install null
             }
@@ -582,7 +626,16 @@ internal class TorchIslandHooks(
             onReleaseTouch = {
                 resetLatestExpandedPress(targets)
             },
+            onExpandedLayout = { layout ->
+                findContentView(layout)?.let { contentView ->
+                    markAsUserExpanded(targets, contentView)
+                    updateOutsideTapMonitor(targets, contentView, true)
+                }
+            },
             onCollapsedWithLayout = { layout ->
+                findContentView(layout)?.let { contentView ->
+                    updateOutsideTapMonitor(targets, contentView, false)
+                }
                 if (isTorchTurnedOffForLayout(targets, layout)) {
                     sendCloseFlashlightIslandBroadcast(layout.context)
                 }
@@ -593,12 +646,29 @@ internal class TorchIslandHooks(
         return host
     }
 
+    private fun isIslandCurrentlyExpanded(targets: PluginTargets, contentView: View?): Boolean {
+        if (contentView == null) return false
+        val coordinator = runCatching { targets.getEventCoordinatorMethod.invoke(contentView) }.getOrNull()
+            ?: return false
+        val windowView = runCatching { targets.coordinatorGetWindowViewMethod.invoke(coordinator) }.getOrNull()
+            ?: return false
+        val expanded = runCatching { targets.getCurrentExpandedStateMethod.invoke(windowView) }.getOrNull()
+        return expanded != null && expanded === contentView
+    }
+
+    private fun isExpandedLike(targets: PluginTargets, state: Any?): Boolean {
+        if (state == null) return false
+        return targets.stateExpandedClass.isInstance(state) ||
+            targets.stateBigIslandClass.isInstance(state) ||
+            targets.stateShowOnceBigIslandClass.isInstance(state)
+    }
+
     private fun isAncestorExpanded(targets: PluginTargets, view: View): Boolean {
         var parent = view.parent
         while (parent != null) {
             if (targets.baseContentViewClass.isInstance(parent)) {
                 val state = targets.getStateMethod.invoke(parent)
-                return targets.stateExpandedClass.isInstance(state)
+                return isExpandedLike(targets, state)
             }
             parent = parent.parent
         }
