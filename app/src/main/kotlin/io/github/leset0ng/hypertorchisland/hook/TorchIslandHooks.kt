@@ -91,9 +91,12 @@ internal class TorchIslandHooks(
                     val isOpen = chain.getArg(0) as Boolean
                     val op = chain.getArg(1) as Int
                     val user = chain.getArg(2)
-                    // The torch was dragged to 0 by the user: keep the expanded island so it can be dragged
-                    // back up. Turning the torch off from anywhere else still closes the island normally.
+                    // Once this gesture has crossed zero, both the delayed torch-off callback and the
+                    // immediate torch-on callback must stay inside the existing island. Otherwise the
+                    // stock controller republishes the flashlight notification while the finger is still
+                    // moving upward, which destroys and recreates MiFlashlightLayout.
                     if (op == 0 || op == 1) {
+                        logInfo("suppress flashlight notification operation=$op after zero crossing")
                         return@install chain.proceed(arrayOf(isOpen, 3, user))
                     }
                 }
@@ -805,7 +808,10 @@ internal class TorchIslandHooks(
         synchronized(dragStates) {
             var protected = false
             dragStates.values.forEach { state ->
-                if (state.draggedToZero || state.preserveNotificationUntilMs > now) {
+                if (state.draggedToZero ||
+                    (state.isDragging && state.touchedZeroInGesture) ||
+                    state.preserveNotificationUntilMs > now
+                ) {
                     protected = true
                 } else if (!state.isDragging) {
                     state.touchedZeroInGesture = false
