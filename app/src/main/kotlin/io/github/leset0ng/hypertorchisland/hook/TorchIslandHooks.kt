@@ -8,6 +8,7 @@ import android.os.Handler
 import android.os.Looper
 import android.os.UserHandle
 import android.service.notification.StatusBarNotification
+import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
@@ -47,6 +48,11 @@ internal class TorchIslandHooks(
 
     @Volatile
     private var latestTouchInteractorRef: WeakReference<Any>? = null
+
+    // True when the camera exposes no torch strength levels. The island then keeps the stock Lottie
+    // switch button instead of the vertical seekbar, mirroring MiFlashlightController's own fallback.
+    @Volatile
+    private var fallbackSwitchMode = false
 
     private class DragState {
         var isDragging: Boolean = false
@@ -340,7 +346,9 @@ internal class TorchIslandHooks(
                     val absX = abs(dx)
                     val absY = abs(dy)
                     val touchSlop = readTouchSlop(targets, interactor)
-                    if (absY > touchSlop && absY >= absX) {
+                    // In the Lottie switch fallback there is no seekbar to hand vertical gestures to,
+                    // so leave them to the stock interactor, which collapses the island on release.
+                    if (!fallbackSwitchMode && absY > touchSlop && absY >= absX) {
                         targets.touchDirectionField.set(
                             interactor,
                             if (dy > 0f) targets.directionDown else targets.directionUp,
@@ -570,17 +578,34 @@ internal class TorchIslandHooks(
         hooks.install(targets.controllerSetSwitchLottieMethod, "plugin.flashlightCtrl.setSwitchLottie") { chain ->
             val controller = chain.thisObject
             val layout = targets.controllerLayoutField.get(controller) as? View
+            val strengthSupported = isStrengthLevelSupported(targets, controller)
             logInfo(
                 "setSwitchLottie layout=${layout?.let { System.identityHashCode(it) }} " +
-                    "registered=${TorchIslandRegistry.isIslandLayout(layout)}",
+                    "registered=${TorchIslandRegistry.isIslandLayout(layout)} supported=$strengthSupported",
             )
             if (!TorchIslandRegistry.isIslandLayout(layout)) {
                 return@install chain.proceed()
             }
-            // Hide switch button & bottom draw-up indicator inside the vertical island.
-            (targets.controllerGetSwitchLottieMethod.invoke(controller) as? View)?.visibility = View.GONE
+            if (strengthSupported) {
+                // Hide switch button & bottom draw-up indicator inside the vertical island.
+                (targets.controllerGetSwitchLottieMethod.invoke(controller) as? View)?.visibility = View.GONE
+                (targets.controllerGetBottomDrawUpMethod.invoke(controller) as? View)?.visibility = View.GONE
+                return@install null
+            }
+            // Non-adjustable torch: setSwitchLottieView(false) is the entire stock fallback for the
+            // full-screen page (bigger switch raised into the seekbar slot), so keep it and re-seat
+            // the button inside the island instead of hiding it.
+            val result = chain.proceed(arrayOf(false))
+            val switchView = targets.controllerGetSwitchLottieMethod.invoke(controller) as? View
+            if (layout != null && switchView != null) {
+                applyFallbackSwitchLayout(layout, switchView)
+            }
+            // The island only exists while the torch is on; stock would have set this from the torch
+            // callback already, but a first tap before that callback arrives must still turn it off.
+            runCatching { targets.controllerSetSwitchStatusMethod.invoke(controller, java.lang.Boolean.TRUE) }
+                .onFailure { t -> logError("Failed to mark flashlight switch as on", t) }
             (targets.controllerGetBottomDrawUpMethod.invoke(controller) as? View)?.visibility = View.GONE
-            null
+            result
         }
 
         hooks.install(targets.controllerSetSeekbarMethod, "plugin.flashlightCtrl.setSeekbar") { chain ->
@@ -605,14 +630,20 @@ internal class TorchIslandHooks(
                 supported = true
             }
             val result = chain.proceed(arrayOf(supported))
+            fallbackSwitchMode = !supported
+            fakeViewsByKey.values.forEach { it.setFallback(fallbackSwitchMode) }
             if (supported) {
                 adaptSeekbarForIsland(targets, controller)
                 if (isEmulator()) {
                     targets.controllerSetSwitchStatusMethod.invoke(controller, java.lang.Boolean.TRUE)
                 }
+                (targets.controllerGetSwitchLottieMethod.invoke(controller) as? View)?.visibility = View.GONE
+            } else {
+                // The seekbar is hidden by the stock call above; setSwitchLottieView(false) runs next
+                // and turns the Lottie switch into the island's only control.
+                logInfo("flashlight strength unsupported, falling back to the Lottie switch")
             }
             (targets.controllerGetBottomDrawUpMethod.invoke(controller) as? View)?.visibility = View.GONE
-            (targets.controllerGetSwitchLottieMethod.invoke(controller) as? View)?.visibility = View.GONE
             result
         }
 
@@ -629,6 +660,33 @@ internal class TorchIslandHooks(
                 chain.proceed()
             }
         }
+    }
+
+    private fun isStrengthLevelSupported(targets: PluginTargets, controller: Any): Boolean {
+        val manager = runCatching { targets.controllerManagerField.get(controller) }.getOrNull()
+            ?: return false
+        // Same threshold as MiFlashlightManager.isSupportStrengthLevel().
+        return runCatching {
+            targets.managerMaxStrengthField.getInt(manager) >= 100
+        }.getOrDefault(false)
+    }
+
+    private fun applyFallbackSwitchLayout(layout: View, switchView: View) {
+        val ctx = layout.context
+        // Stock already resized the button to mi_no_seekbar_switch_btn_size; keep that size and only
+        // move it, so the island fallback stays visually identical to the native page.
+        val current = switchView.layoutParams
+        val stockSize = if (current != null) maxOf(current.width, current.height) else 0
+        val size = if (stockSize > 0) stockSize else TorchIslandSpecs.fallbackSwitchSizePx(ctx)
+        switchView.visibility = View.VISIBLE
+        switchView.layoutParams = FrameLayout.LayoutParams(
+            size,
+            size,
+            Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL,
+        ).apply {
+            bottomMargin = TorchIslandSpecs.fallbackSwitchMarginBottomPx(ctx, size)
+        }
+        switchView.requestLayout()
     }
 
     private fun adaptSeekbarForIsland(targets: PluginTargets, controller: Any) {
@@ -750,6 +808,7 @@ internal class TorchIslandHooks(
     private fun getOrCreateFakeView(ctx: Context, key: String): TorchIslandFakeView {
         fakeViewsByKey[key]?.let { return it }
         val fake = TorchIslandFakeView(ctx)
+        fake.setFallback(fallbackSwitchMode)
         fakeViewsByKey[key] = fake
         return fake
     }

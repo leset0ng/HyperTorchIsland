@@ -16,6 +16,7 @@ An LSPosed module (libxposed API 102) for HyperOS that turns the flashlight Supe
 - The expanded island is a tall card centered at the top of the screen. It uses the system `island_radius`, so its corners line up with the stock island outline.
 - The card hosts the stock `MiFlashlightLayout` from `miui.systemui.plugin`: the GL beam effect, the vertical seekbar, haptics and localized strings. The on/off button and the swipe-up hint are hidden.
 - Drag vertically to change brightness. Dragging to zero turns the torch off without rebuilding the island, so you can drag back up to turn it on again.
+- On torches without adjustable strength the island doesn't go blank: it shows the stock switch button, placed the same way as on the native full-screen flashlight page, so a tap still turns the torch off.
 - Swipe sideways or tap outside to collapse. Tapping inside the card no longer opens the full-screen flashlight page.
 - The status bar is no longer disabled while the flashlight UI is on screen.
 - If the island collapses while the torch is off, the flashlight notification is removed.
@@ -24,7 +25,7 @@ An LSPosed module (libxposed API 102) for HyperOS that turns the flashlight Supe
 
 - HyperOS with Super Island. Tested on `OS4.0.24.0.XFRCNXM` and `OS4.0.4.0.XBLCNXM` (Android 17 / SDK 37). Other builds may work but have not been tested.
 - Root and an LSPosed build that supports the modern libxposed API 102.
-- A torch with adjustable strength (`FLASH_INFO_STRENGTH_MAXIMUM_LEVEL > 1`). Without it, there is no brightness slider.
+- A torch with adjustable strength (`FLASH_INFO_STRENGTH_MAXIMUM_LEVEL >= 100`) for the brightness slider. Without it, the island shows the stock switch button instead.
 
 ## Install
 

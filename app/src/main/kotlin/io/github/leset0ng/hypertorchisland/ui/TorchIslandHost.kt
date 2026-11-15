@@ -52,6 +52,32 @@ internal object TorchIslandSpecs {
     const val TOUCH_VIEW_MARGIN_BOTTOM_DP = 8f
     const val TOUCH_VIEW_MARGIN_HORIZONTAL_DP = 18f
 
+    // Stock MiFlashlightController replaces the seekbar with its Lottie switch button when the camera
+    // has no torch strength levels (isSupportStrengthLevel() == false). That button is sized by this dimen.
+    private const val FALLBACK_SWITCH_SIZE_RES = "mi_no_seekbar_switch_btn_size"
+    private const val FALLBACK_SWITCH_SIZE_FALLBACK_DP = 68f
+
+    @Volatile
+    private var cachedFallbackSwitchSizePx = 0
+
+    fun fallbackSwitchSizePx(context: Context): Int {
+        cachedFallbackSwitchSizePx.takeIf { it > 0 }?.let { return it }
+        val resolved = runCatching {
+            val id = context.resources.getIdentifier(FALLBACK_SWITCH_SIZE_RES, "dimen", PLUGIN_PKG)
+            if (id == 0) 0 else context.resources.getDimensionPixelSize(id)
+        }.getOrDefault(0)
+        val size = if (resolved > 0) resolved else dp(context, FALLBACK_SWITCH_SIZE_FALLBACK_DP)
+        cachedFallbackSwitchSizePx = size
+        return size
+    }
+
+    // Stock raises the switch from 87dp to 151.5dp so it lands where the vertical seekbar used to be.
+    // The island mirrors that by centering the switch in its own seekbar slot.
+    fun fallbackSwitchMarginBottomPx(context: Context, switchSizePx: Int): Int {
+        val slotCenter = dpF(context, SEEKBAR_MARGIN_BOTTOM_DP + SEEKBAR_HEIGHT_DP / 2f)
+        return (slotCenter - switchSizePx / 2f).toInt().coerceAtLeast(0)
+    }
+
     fun dp(context: Context, dp: Float): Int {
         return TypedValue.applyDimension(
             TypedValue.COMPLEX_UNIT_DIP,
@@ -248,6 +274,8 @@ internal class TorchIslandFakeView(
     private val targetWidthPx = TorchIslandSpecs.dp(pluginContext, TorchIslandSpecs.ISLAND_WIDTH_DP)
     private val targetHeightPx = TorchIslandSpecs.dp(pluginContext, TorchIslandSpecs.ISLAND_HEIGHT_DP)
     private val cornerRadiusPx = TorchIslandSpecs.cornerRadiusPx(pluginContext)
+    private val trackPlaceholder: View
+    private val switchPlaceholder: View
 
     init {
         layoutParams = LayoutParams(targetWidthPx, targetHeightPx, Gravity.CENTER_HORIZONTAL)
@@ -262,7 +290,7 @@ internal class TorchIslandFakeView(
         val barWidth = TorchIslandSpecs.dp(pluginContext, TorchIslandSpecs.SEEKBAR_WIDTH_DP)
         val barHeight = TorchIslandSpecs.dp(pluginContext, TorchIslandSpecs.SEEKBAR_HEIGHT_DP)
         val barMarginBottom = TorchIslandSpecs.dp(pluginContext, TorchIslandSpecs.SEEKBAR_MARGIN_BOTTOM_DP)
-        val trackPlaceholder = View(pluginContext).apply {
+        trackPlaceholder = View(pluginContext).apply {
             val bgResId = pluginContext.resources.getIdentifier(
                 "mi_seekbar_bg",
                 "drawable",
@@ -283,6 +311,31 @@ internal class TorchIslandFakeView(
                 bottomMargin = barMarginBottom
             },
         )
+
+        // Placeholder for the stock Lottie switch that replaces the seekbar on non-adjustable torches.
+        val switchSize = TorchIslandSpecs.fallbackSwitchSizePx(pluginContext)
+        switchPlaceholder = View(pluginContext).apply {
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(0x26FFFFFF)
+                setStroke(
+                    TorchIslandSpecs.dp(pluginContext, 1f).coerceAtLeast(1),
+                    0x33FFFFFF,
+                )
+            }
+            visibility = View.GONE
+        }
+        addView(
+            switchPlaceholder,
+            LayoutParams(switchSize, switchSize, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply {
+                bottomMargin = TorchIslandSpecs.fallbackSwitchMarginBottomPx(pluginContext, switchSize)
+            },
+        )
+    }
+
+    fun setFallback(enabled: Boolean) {
+        trackPlaceholder.visibility = if (enabled) View.GONE else View.VISIBLE
+        switchPlaceholder.visibility = if (enabled) View.VISIBLE else View.GONE
     }
 
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
