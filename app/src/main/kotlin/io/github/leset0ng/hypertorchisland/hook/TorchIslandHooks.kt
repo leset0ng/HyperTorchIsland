@@ -1,17 +1,23 @@
 package io.github.leset0ng.hypertorchisland.hook
 
 import android.content.Context
+import android.content.Intent
 import android.os.Build
 import android.os.Bundle
+import android.os.UserHandle
 import android.service.notification.StatusBarNotification
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
+import android.widget.ProgressBar
 import io.github.leset0ng.hypertorchisland.ui.TorchIslandFakeView
 import io.github.leset0ng.hypertorchisland.ui.TorchIslandHostView
 import io.github.leset0ng.hypertorchisland.ui.TorchIslandRegistry
 import io.github.leset0ng.hypertorchisland.ui.TorchIslandSpecs
+import java.lang.ref.WeakReference
+import java.util.Collections
+import java.util.WeakHashMap
 import kotlin.math.abs
 
 internal class TorchIslandHooks(
@@ -33,6 +39,16 @@ internal class TorchIslandHooks(
     private var pluginTargets: PluginTargets? = null
     private val hostViewsByKey = HashMap<String, TorchIslandHostView>()
     private val fakeViewsByKey = HashMap<String, TorchIslandFakeView>()
+    private val controllerByLayout = Collections.synchronizedMap(WeakHashMap<View, Any>())
+    private val dragStates = Collections.synchronizedMap(WeakHashMap<Any, DragState>())
+
+    @Volatile
+    private var latestTouchInteractorRef: WeakReference<Any>? = null
+
+    private class DragState {
+        var isDragging: Boolean = false
+        var draggedToZero: Boolean = false
+    }
 
     fun installSystemUi(
         systemUiClassLoader: ClassLoader,
@@ -61,6 +77,21 @@ internal class TorchIslandHooks(
                     }
                 }
                 result
+            }
+        }
+
+        sysTargets.handleFocusNotificationMethod?.let { handleFocusMethod ->
+            hooks.install(handleFocusMethod, "sysui.flashlightCtrl.handleFocusNotification") { chain ->
+                if (isAnyTorchIslandExpanded()) {
+                    val isOpen = chain.getArg(0) as Boolean
+                    val op = chain.getArg(1) as Int
+                    val user = chain.getArg(2)
+                    // Keep the expanded island alive while it is open (even when dragged to 0 and released).
+                    if (op == 0 || op == 1) {
+                        return@install chain.proceed(arrayOf(isOpen, 3, user))
+                    }
+                }
+                chain.proceed()
             }
         }
 
@@ -226,8 +257,10 @@ internal class TorchIslandHooks(
         hooks.install(targets.onInterceptTouchEventMethod, "plugin.touchInteractor.onIntercept") { chain ->
             val event = chain.getArg(0) as? MotionEvent ?: return@install chain.proceed()
             val interactor = chain.thisObject
+            latestTouchInteractorRef = WeakReference(interactor)
+            val action = event.actionMasked
 
-            if (event.actionMasked == MotionEvent.ACTION_MOVE) {
+            if (action == MotionEvent.ACTION_MOVE) {
                 val downInExpanded = targets.touchDownInExpandedField.getBoolean(interactor)
                 val currentIntercepted = targets.touchInterceptedField.get(interactor)
                 if (downInExpanded && currentIntercepted == null && isTorchCurrentlyExpanded(targets, interactor)) {
@@ -246,6 +279,12 @@ internal class TorchIslandHooks(
                         targets.touchInterceptedField.set(interactor, java.lang.Boolean.FALSE)
                         return@install null
                     }
+                }
+            } else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+                if (targets.touchDownInExpandedField.getBoolean(interactor) &&
+                    isTorchCurrentlyExpanded(targets, interactor)
+                ) {
+                    resetExpandedPress(targets, interactor)
                 }
             }
             chain.proceed()
@@ -266,6 +305,105 @@ internal class TorchIslandHooks(
             val layout = targets.controllerLayoutField.get(controller) as? View
             if (TorchIslandRegistry.isIslandLayout(layout) && layout != null) {
                 targets.controllerContextField.set(controller, layout.context)
+                controllerByLayout[layout] = controller
+            }
+            chain.proceed()
+        }
+
+        hooks.install(targets.layoutShowViewMethod, "plugin.flashlightLayout.showView") { chain ->
+            val result = chain.proceed()
+            val layout = chain.thisObject as? View
+            if (TorchIslandRegistry.isIslandLayout(layout) && layout != null) {
+                val needAnim = targets.layoutIsNeedAnimMethod.invoke(layout) as? Boolean ?: true
+                if (!needAnim) {
+                    // Without MiFlashlightLayout's alpha/blur show animation, onAnimEnd() never runs,
+                    // so resume() must be called explicitly to start MglRenderer's FrameSync render loop.
+                    targets.layoutResumeMethod.invoke(layout)
+                }
+                val controller = controllerByLayout[layout]
+                if (controller != null) {
+                    val ui = targets.controllerUiField.get(controller)
+                    val manager = targets.controllerManagerField.get(controller)
+                    val savedStrength = (manager?.let {
+                        targets.managerGetLogicStrengthMethod.invoke(it) as? Float
+                    }) ?: targets.controllerLogicProgressField.getFloat(controller)
+                    if (ui != null && savedStrength > 0f) {
+                        targets.uiSetProgressMethod.invoke(ui, savedStrength.coerceIn(0.15f, 1.0f))
+                    }
+                }
+            }
+            result
+        }
+
+        hooks.install(targets.seekBarTouchDoTouchMethod, "plugin.flashlightSeekBar.doTouch") { chain ->
+            val touchListener = chain.thisObject
+            val controller = targets.seekBarTouchControllerField.get(touchListener)
+            val layout = controller?.let { targets.controllerLayoutField.get(it) as? View }
+            if (controller == null || !TorchIslandRegistry.isIslandLayout(layout)) {
+                return@install chain.proceed()
+            }
+            val event = chain.getArg(0) as? MotionEvent
+            val state = dragStates.getOrPut(controller) { DragState() }
+            when (event?.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    state.isDragging = true
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    state.isDragging = false
+                }
+            }
+            chain.proceed()
+        }
+
+        hooks.install(targets.controllerSetFlashlightStatusMethod, "plugin.flashlightCtrl.setFlashlightStatus") { chain ->
+            val controller = chain.thisObject
+            val layout = targets.controllerLayoutField.get(controller) as? View
+            if (!TorchIslandRegistry.isIslandLayout(layout)) {
+                return@install chain.proceed()
+            }
+            val percentage = chain.getArg(0) as Float
+            val state = dragStates.getOrPut(controller) { DragState() }
+            if (state.isDragging && percentage <= 0.0f) {
+                state.draggedToZero = true
+            } else if (percentage > 0.0f) {
+                state.draggedToZero = false
+            }
+            // Always proceed so MiFlashlightManager.asyncOperate(false) turns off the real torch immediately!
+            chain.proceed()
+        }
+
+        hooks.install(targets.controllerUpdateFlashlightUiMethod, "plugin.flashlightCtrl.updateFlashlightUi") { chain ->
+            val controller = chain.thisObject
+            val layout = targets.controllerLayoutField.get(controller) as? View
+            if (!TorchIslandRegistry.isIslandLayout(layout)) {
+                return@install chain.proceed()
+            }
+            val state = dragStates[controller]
+            val f2 = (chain.getArg(0) as Float).coerceIn(0f, 1f)
+            if (state != null && (state.isDragging || state.draggedToZero)) {
+                val ui = targets.controllerUiField.get(controller)
+                if (ui != null) {
+                    targets.uiSetProgressMethod.invoke(ui, f2)
+                }
+                return@install null
+            }
+            chain.proceed()
+        }
+
+        hooks.install(targets.controllerUpdateSeekBarProcessMethod, "plugin.flashlightCtrl.updateSeekBarProcess") { chain ->
+            val controller = chain.thisObject
+            val layout = targets.controllerLayoutField.get(controller) as? View
+            if (!TorchIslandRegistry.isIslandLayout(layout)) {
+                return@install chain.proceed()
+            }
+            val state = dragStates[controller]
+            val f2 = (chain.getArg(0) as Float).coerceIn(0f, 1f)
+            if (state != null && (state.isDragging || state.draggedToZero)) {
+                val seekbar = targets.controllerGetSeekbarMethod.invoke(controller) as? ProgressBar
+                if (seekbar != null && seekbar.visibility != View.GONE) {
+                    seekbar.progress = (seekbar.max * f2).toInt()
+                }
+                return@install null
             }
             chain.proceed()
         }
@@ -364,12 +502,11 @@ internal class TorchIslandHooks(
         }
 
         (touchView?.layoutParams as? FrameLayout.LayoutParams)?.let { lp ->
-            val marginH = TorchIslandSpecs.dp(ctx, TorchIslandSpecs.TOUCH_VIEW_MARGIN_HORIZONTAL_DP)
             lp.width = ViewGroup.LayoutParams.MATCH_PARENT
-            lp.height = TorchIslandSpecs.dp(ctx, TorchIslandSpecs.TOUCH_VIEW_HEIGHT_DP)
-            lp.bottomMargin = TorchIslandSpecs.dp(ctx, TorchIslandSpecs.TOUCH_VIEW_MARGIN_BOTTOM_DP)
-            lp.marginStart = marginH
-            lp.marginEnd = marginH
+            lp.height = ViewGroup.LayoutParams.MATCH_PARENT
+            lp.bottomMargin = 0
+            lp.marginStart = 0
+            lp.marginEnd = 0
             touchView.layoutParams = lp
         }
     }
@@ -395,6 +532,14 @@ internal class TorchIslandHooks(
             },
             isExpandedState = { view ->
                 isAncestorExpanded(targets, view)
+            },
+            onReleaseTouch = {
+                resetLatestExpandedPress(targets)
+            },
+            onCollapsedWithLayout = { layout ->
+                if (isTorchTurnedOffForLayout(targets, layout)) {
+                    sendCloseFlashlightIslandBroadcast(layout.context)
+                }
             },
             logError = logError,
         )
@@ -476,6 +621,58 @@ internal class TorchIslandHooks(
         return isFlashlightIsland(targets, data)
     }
 
+    private fun isAnyTorchIslandExpanded(): Boolean {
+        return hostViewsByKey.values.any { it.isAttachedToWindow && it.isShown }
+    }
+
+    private fun isTorchTurnedOffForLayout(targets: PluginTargets, layout: View): Boolean {
+        val controller = controllerByLayout[layout] ?: return false
+        val state = dragStates[controller]
+        if (state?.draggedToZero == true) return true
+        val switchStatus = runCatching {
+            targets.controllerGetSwitchStatusMethod.invoke(controller) as? Boolean
+        }.getOrNull()
+        return switchStatus == false
+    }
+
+    private fun sendCloseFlashlightIslandBroadcast(fallbackContext: Context) {
+        runCatching {
+            val sysCtx = runCatching {
+                Class.forName("android.app.ActivityThread")
+                    .getMethod("currentApplication")
+                    .invoke(null) as? Context
+            }.getOrNull() ?: fallbackContext
+            val intent = Intent("miui.systemui.action.ACTION_TOGGLE_FLASHLIGHT").apply {
+                setPackage(PLUGIN_PKG)
+                putExtra("flashlight_is_open_or_close", false)
+                putExtra("notification_operation", 0)
+            }
+            sysCtx.sendBroadcast(intent)
+        }.onFailure { t ->
+            logError("Failed to close flashlight island notification on collapse while torch off", t)
+        }
+    }
+
+    private fun resetLatestExpandedPress(targets: PluginTargets) {
+        val interactor = latestTouchInteractorRef?.get() ?: return
+        resetExpandedPress(targets, interactor)
+    }
+
+    private fun resetExpandedPress(targets: PluginTargets, interactor: Any) {
+        runCatching {
+            val provider = targets.touchEventCoordinatorField.get(interactor) ?: return
+            val getMethod = provider.javaClass.methods.firstOrNull { it.name == "get" && it.parameterCount == 0 }
+                ?: return
+            val coordinator = getMethod.invoke(provider) ?: return
+            targets.eventCoordinatorResetPressMethod.invoke(
+                coordinator,
+                java.lang.Boolean.FALSE,
+                java.lang.Boolean.FALSE,
+                java.lang.Boolean.TRUE,
+            )
+        }
+    }
+
     private fun readTouchSlop(targets: PluginTargets, interactor: Any): Float {
         val constants = targets.touchConstantsField.get(interactor) ?: return DEFAULT_TOUCH_SLOP_PX
         val flow = targets.touchConstantsGetTouchSlopMethod.invoke(constants) ?: return DEFAULT_TOUCH_SLOP_PX
@@ -491,6 +688,9 @@ internal class TorchIslandHooks(
         }
         hostViewsByKey.clear()
         fakeViewsByKey.clear()
+        controllerByLayout.clear()
+        dragStates.clear()
+        latestTouchInteractorRef = null
     }
 
     private companion object {

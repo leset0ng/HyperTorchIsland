@@ -1,6 +1,7 @@
 package io.github.leset0ng.hypertorchisland.hook
 
 import android.content.Context
+import android.os.UserHandle
 import android.view.MotionEvent
 import android.view.View
 import java.lang.reflect.Field
@@ -11,6 +12,7 @@ internal data class SystemUiTargets(
     val onPluginLoadedMethod: Method,
     val getContentMethod: Method?,
     val currentPluginField: Field?,
+    val handleFocusNotificationMethod: Method?,
 )
 
 internal data class PluginTargets(
@@ -23,18 +25,31 @@ internal data class PluginTargets(
     val getMiFlashlightLayoutMethod: Method,
     val dismissMethod: Method,
     val hideFlashlightMethod: Method,
+    val managerAsyncOperateMethod: Method,
+    val managerAsyncToggleFlashLightMethod: Method,
+    val managerSaveLogicStrengthMethod: Method,
+    val managerGetLogicStrengthMethod: Method,
     val miFlashlightLayoutClass: Class<*>,
     val disableStatusBarMethod: Method,
     val enableStatusBarMethod: Method,
+    val layoutIsNeedAnimMethod: Method,
+    val layoutShowViewMethod: Method,
+    val layoutResumeMethod: Method,
     val miFlashlightControllerClass: Class<*>,
     val controllerContextField: Field,
     val controllerLayoutField: Field,
     val controllerManagerField: Field,
+    val controllerUiField: Field,
+    val controllerLogicProgressField: Field,
     val controllerStartMethod: Method,
     val controllerStopMethod: Method,
     val controllerSetSeekbarMethod: Method,
     val controllerSetSwitchLottieMethod: Method,
     val controllerSetSwitchStatusMethod: Method,
+    val controllerGetSwitchStatusMethod: Method,
+    val controllerSetFlashlightStatusMethod: Method,
+    val controllerUpdateFlashlightUiMethod: Method,
+    val controllerUpdateSeekBarProcessMethod: Method,
     val controllerGetSeekbarContainerMethod: Method,
     val controllerGetSeekbarTouchViewMethod: Method,
     val controllerGetSeekbarBgMethod: Method,
@@ -42,6 +57,9 @@ internal data class PluginTargets(
     val controllerGetSwitchLottieMethod: Method,
     val controllerGetBottomDrawUpMethod: Method,
     val controllerGetSeekBarTouchLengthMethod: Method?,
+    val uiSetProgressMethod: Method,
+    val seekBarTouchDoTouchMethod: Method,
+    val seekBarTouchControllerField: Field,
     val toggleChangeReceiverClass: Class<*>,
     val toggleCompanionField: Field,
     val saveFlashlightShowStatusMethod: Method,
@@ -81,6 +99,8 @@ internal data class PluginTargets(
     val touchDownInExpandedField: Field,
     val touchConstantsField: Field,
     val touchWindowViewField: Field,
+    val touchEventCoordinatorField: Field,
+    val eventCoordinatorResetPressMethod: Method,
     val touchConstantsGetTouchSlopMethod: Method,
     val directionUp: Any,
     val directionDown: Any,
@@ -121,11 +141,25 @@ internal object PluginTargetResolver {
         }.getOrNull() ?: runCatching {
             controllerClass.getDeclaredField("currentPlugin").apply { isAccessible = true }
         }.getOrNull()
+        val handleFocusNotificationMethod = runCatching {
+            val sysuiFlashlightCtrl = Class.forName(
+                "com.android.systemui.controlcenter.policy.MiuiFlashlightControllerImpl",
+                false,
+                classLoader,
+            )
+            sysuiFlashlightCtrl.getDeclaredMethod(
+                "handleFocusNotificationOrStatus",
+                Boolean::class.javaPrimitiveType,
+                Int::class.javaPrimitiveType,
+                UserHandle::class.java,
+            )
+        }.getOrNull()
         return SystemUiTargets(
             pluginControllerClass = controllerClass,
             onPluginLoadedMethod = onPluginLoaded,
             getContentMethod = getContent,
             currentPluginField = currentPluginField,
+            handleFocusNotificationMethod = handleFocusNotificationMethod,
         )
     }
 
@@ -149,15 +183,35 @@ internal object PluginTargetResolver {
         )
         val dismissMethod = managerClass.getDeclaredMethod("dismiss", Int::class.javaPrimitiveType)
         val hideFlashlightMethod = managerClass.getDeclaredMethod("hideFlashlight")
+        val managerAsyncOperateMethod = managerClass.declaredMethods.first {
+            it.name == "asyncOperate" &&
+                it.parameterCount == 2 &&
+                it.parameterTypes[0] == Boolean::class.javaPrimitiveType
+        }
+        val managerAsyncToggleFlashLightMethod = managerClass.declaredMethods.first {
+            it.name == "asyncToggleFlashLight" &&
+                it.parameterCount == 2 &&
+                it.parameterTypes[0] == Float::class.javaPrimitiveType
+        }
+        val managerSaveLogicStrengthMethod = managerClass.getDeclaredMethod(
+            "saveLogicStrength",
+            Float::class.javaPrimitiveType,
+        )
+        val managerGetLogicStrengthMethod = managerClass.getDeclaredMethod("getLogicStrength")
 
         val layoutClass = Class.forName("miui.systemui.flashlight.view.MiFlashlightLayout", false, pluginLoader)
         val disableStatusBarMethod = layoutClass.getDeclaredMethod("disableStatusBar")
         val enableStatusBarMethod = layoutClass.getDeclaredMethod("enableStatusBar")
+        val layoutIsNeedAnimMethod = layoutClass.getDeclaredMethod("isNeedAnim")
+        val layoutShowViewMethod = layoutClass.getDeclaredMethod("showView")
+        val layoutResumeMethod = layoutClass.getDeclaredMethod("resume")
 
         val controllerClass = Class.forName("miui.systemui.flashlight.MiFlashlightController", false, pluginLoader)
         val controllerContextField = controllerClass.getDeclaredField("context").apply { isAccessible = true }
         val controllerLayoutField = controllerClass.getDeclaredField("miFlashlightLayout").apply { isAccessible = true }
         val controllerManagerField = controllerClass.getDeclaredField("miFlashlightManager").apply { isAccessible = true }
+        val controllerUiField = controllerClass.getDeclaredField("miFlashlightUi").apply { isAccessible = true }
+        val controllerLogicProgressField = controllerClass.getDeclaredField("logicProgress").apply { isAccessible = true }
         val controllerStartMethod = controllerClass.getDeclaredMethod("onStart")
         val controllerStopMethod = controllerClass.getDeclaredMethod("onStop")
         val controllerSetSeekbarMethod = controllerClass.getDeclaredMethod("setSeekbar", Boolean::class.javaPrimitiveType)
@@ -165,6 +219,20 @@ internal object PluginTargetResolver {
         val controllerSetSwitchStatusMethod = controllerClass.getDeclaredMethod(
             "setSwitchStatus",
             Boolean::class.javaObjectType,
+        ).apply { isAccessible = true }
+        val controllerGetSwitchStatusMethod = controllerClass.getDeclaredMethod("getSwitchStatus")
+            .apply { isAccessible = true }
+        val controllerSetFlashlightStatusMethod = controllerClass.getDeclaredMethod(
+            "setFlashlightStatus",
+            Float::class.javaPrimitiveType,
+        ).apply { isAccessible = true }
+        val controllerUpdateFlashlightUiMethod = controllerClass.getDeclaredMethod(
+            "updateFlashlightUi",
+            Float::class.javaPrimitiveType,
+        ).apply { isAccessible = true }
+        val controllerUpdateSeekBarProcessMethod = controllerClass.getDeclaredMethod(
+            "updateSeekBarProcess",
+            Float::class.javaPrimitiveType,
         ).apply { isAccessible = true }
         val controllerGetSeekbarContainerMethod = controllerClass.getDeclaredMethod("getSeekbarContainer")
             .apply { isAccessible = true }
@@ -181,6 +249,21 @@ internal object PluginTargetResolver {
         val controllerGetSeekBarTouchLengthMethod = runCatching {
             controllerClass.getDeclaredMethod("getSeekBarTouchLength").apply { isAccessible = true }
         }.getOrNull()
+
+        val uiClass = Class.forName("miui.systemui.flashlight.effect.MiFlashlightUi", false, pluginLoader)
+        val uiSetProgressMethod = uiClass.getDeclaredMethod("setProgress", Float::class.javaPrimitiveType)
+
+        val seekBarTouchListenerClass = Class.forName(
+            "miui.systemui.flashlight.MiFlashlightController\$seekBarOnTouchListener\$2\$1",
+            false,
+            pluginLoader,
+        )
+        val seekBarTouchDoTouchMethod = seekBarTouchListenerClass.getDeclaredMethod(
+            "doTouch",
+            MotionEvent::class.java,
+        ).apply { isAccessible = true }
+        val seekBarTouchControllerField = seekBarTouchListenerClass.getDeclaredField("this\$0")
+            .apply { isAccessible = true }
 
         val toggleReceiverClass = Class.forName("miui.systemui.flashlight.ToggleChangeReceiver", false, pluginLoader)
         val toggleCompanionField = toggleReceiverClass.getDeclaredField("Companion").apply { isAccessible = true }
@@ -298,6 +381,19 @@ internal object PluginTargetResolver {
         val touchDownInExpandedField = touchInteractorClass.getDeclaredField("downInExpanded").apply { isAccessible = true }
         val touchConstantsField = touchInteractorClass.getDeclaredField("touchConstants").apply { isAccessible = true }
         val touchWindowViewField = touchInteractorClass.getDeclaredField("windowView").apply { isAccessible = true }
+        val touchEventCoordinatorField = touchInteractorClass.getDeclaredField("eventCoordinator")
+            .apply { isAccessible = true }
+        val eventCoordinatorClass = Class.forName(
+            "miui.systemui.dynamicisland.event.DynamicIslandEventCoordinator",
+            false,
+            pluginLoader,
+        )
+        val eventCoordinatorResetPressMethod = eventCoordinatorClass.getDeclaredMethod(
+            "resetPress",
+            Boolean::class.javaPrimitiveType,
+            Boolean::class.javaPrimitiveType,
+            Boolean::class.javaPrimitiveType,
+        )
 
         val touchConstantsClass = Class.forName(
             "miui.systemui.dynamicisland.touch.data.repository.DynamicIslandTouchConstantsRepository",
@@ -344,18 +440,31 @@ internal object PluginTargetResolver {
             getMiFlashlightLayoutMethod = getMiFlashlightLayoutMethod,
             dismissMethod = dismissMethod,
             hideFlashlightMethod = hideFlashlightMethod,
+            managerAsyncOperateMethod = managerAsyncOperateMethod,
+            managerAsyncToggleFlashLightMethod = managerAsyncToggleFlashLightMethod,
+            managerSaveLogicStrengthMethod = managerSaveLogicStrengthMethod,
+            managerGetLogicStrengthMethod = managerGetLogicStrengthMethod,
             miFlashlightLayoutClass = layoutClass,
             disableStatusBarMethod = disableStatusBarMethod,
             enableStatusBarMethod = enableStatusBarMethod,
+            layoutIsNeedAnimMethod = layoutIsNeedAnimMethod,
+            layoutShowViewMethod = layoutShowViewMethod,
+            layoutResumeMethod = layoutResumeMethod,
             miFlashlightControllerClass = controllerClass,
             controllerContextField = controllerContextField,
             controllerLayoutField = controllerLayoutField,
             controllerManagerField = controllerManagerField,
+            controllerUiField = controllerUiField,
+            controllerLogicProgressField = controllerLogicProgressField,
             controllerStartMethod = controllerStartMethod,
             controllerStopMethod = controllerStopMethod,
             controllerSetSeekbarMethod = controllerSetSeekbarMethod,
             controllerSetSwitchLottieMethod = controllerSetSwitchLottieMethod,
             controllerSetSwitchStatusMethod = controllerSetSwitchStatusMethod,
+            controllerGetSwitchStatusMethod = controllerGetSwitchStatusMethod,
+            controllerSetFlashlightStatusMethod = controllerSetFlashlightStatusMethod,
+            controllerUpdateFlashlightUiMethod = controllerUpdateFlashlightUiMethod,
+            controllerUpdateSeekBarProcessMethod = controllerUpdateSeekBarProcessMethod,
             controllerGetSeekbarContainerMethod = controllerGetSeekbarContainerMethod,
             controllerGetSeekbarTouchViewMethod = controllerGetSeekbarTouchViewMethod,
             controllerGetSeekbarBgMethod = controllerGetSeekbarBgMethod,
@@ -363,6 +472,9 @@ internal object PluginTargetResolver {
             controllerGetSwitchLottieMethod = controllerGetSwitchLottieMethod,
             controllerGetBottomDrawUpMethod = controllerGetBottomDrawUpMethod,
             controllerGetSeekBarTouchLengthMethod = controllerGetSeekBarTouchLengthMethod,
+            uiSetProgressMethod = uiSetProgressMethod,
+            seekBarTouchDoTouchMethod = seekBarTouchDoTouchMethod,
+            seekBarTouchControllerField = seekBarTouchControllerField,
             toggleChangeReceiverClass = toggleReceiverClass,
             toggleCompanionField = toggleCompanionField,
             saveFlashlightShowStatusMethod = saveFlashlightShowStatusMethod,
@@ -402,6 +514,8 @@ internal object PluginTargetResolver {
             touchDownInExpandedField = touchDownInExpandedField,
             touchConstantsField = touchConstantsField,
             touchWindowViewField = touchWindowViewField,
+            touchEventCoordinatorField = touchEventCoordinatorField,
+            eventCoordinatorResetPressMethod = eventCoordinatorResetPressMethod,
             touchConstantsGetTouchSlopMethod = touchConstantsGetTouchSlopMethod,
             directionUp = directionUp,
             directionDown = directionDown,

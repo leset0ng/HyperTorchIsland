@@ -10,6 +10,7 @@ import android.os.Looper
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.LayoutInflater
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.ViewOutlineProvider
@@ -82,6 +83,8 @@ internal class TorchIslandHostView(
     private val createFlashlightLayout: (Context) -> View,
     private val dismissFlashlightLayout: (Int) -> Unit,
     private val isExpandedState: (View) -> Boolean,
+    private val onReleaseTouch: () -> Unit,
+    private val onCollapsedWithLayout: (View) -> Unit,
     private val logError: (String, Throwable) -> Unit,
 ) : FrameLayout(pluginContext) {
 
@@ -92,6 +95,7 @@ internal class TorchIslandHostView(
     private val cornerRadiusPx = TorchIslandSpecs.dpF(pluginContext, TorchIslandSpecs.ISLAND_CORNER_RADIUS_DP)
 
     private var activeFlashlightLayout: View? = null
+    private var collapseNotifiedForCurrentAttach = false
     private val pendingDetachRunnable = Runnable {
         if (!shouldStayActive()) {
             detachFlashlightLayout()
@@ -114,6 +118,15 @@ internal class TorchIslandHostView(
             MeasureSpec.makeMeasureSpec(targetWidthPx, MeasureSpec.EXACTLY),
             MeasureSpec.makeMeasureSpec(targetHeightPx, MeasureSpec.EXACTLY),
         )
+    }
+
+    override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
+        val handled = super.dispatchTouchEvent(ev)
+        val action = ev.actionMasked
+        if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+            onReleaseTouch()
+        }
+        return handled
     }
 
     override fun onAttachedToWindow() {
@@ -143,6 +156,11 @@ internal class TorchIslandHostView(
             mainHandler.removeCallbacks(pendingDetachRunnable)
             ensureFlashlightLayoutAttached()
         } else {
+            val layout = activeFlashlightLayout
+            if (layout != null && !collapseNotifiedForCurrentAttach) {
+                collapseNotifiedForCurrentAttach = true
+                onCollapsedWithLayout(layout)
+            }
             mainHandler.removeCallbacks(pendingDetachRunnable)
             mainHandler.postDelayed(pendingDetachRunnable, DETACH_DELAY_MS)
         }
@@ -170,6 +188,7 @@ internal class TorchIslandHostView(
             )
             addView(layout)
             activeFlashlightLayout = layout
+            collapseNotifiedForCurrentAttach = false
         } catch (t: Throwable) {
             logError("Failed to attach native MiFlashlightLayout", t)
         }
@@ -177,6 +196,10 @@ internal class TorchIslandHostView(
 
     private fun detachFlashlightLayout() {
         val layout = activeFlashlightLayout ?: return
+        if (!collapseNotifiedForCurrentAttach) {
+            collapseNotifiedForCurrentAttach = true
+            onCollapsedWithLayout(layout)
+        }
         activeFlashlightLayout = null
         val hash = layout.hashCode()
         TorchIslandRegistry.unregisterLayout(layout)
