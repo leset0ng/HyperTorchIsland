@@ -1,0 +1,11 @@
+re-hyperos/
+re-**/**
+.gradle/
+.kotlin/
+.idea/
+*.iml
+build/
+app/build/
+local.properties
+*.keystore
+*.jks
