@@ -51,6 +51,8 @@ internal class TorchIslandHooks(
     private class DragState {
         var isDragging: Boolean = false
         var draggedToZero: Boolean = false
+        var touchedZeroInGesture: Boolean = false
+        var preserveNotificationUntilMs: Long = 0L
     }
 
     fun installSystemUi(
@@ -425,9 +427,18 @@ internal class TorchIslandHooks(
             when (event?.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
                     state.isDragging = true
+                    state.draggedToZero = false
+                    state.touchedZeroInGesture = false
+                    state.preserveNotificationUntilMs = 0L
                 }
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                     state.isDragging = false
+                    if (state.touchedZeroInGesture && !state.draggedToZero) {
+                        // The torch-off callback can arrive after the finger has already moved back up.
+                        // Keep the notification in the island until that delayed callback is consumed.
+                        state.preserveNotificationUntilMs =
+                            System.currentTimeMillis() + TORCH_GESTURE_SETTLE_MS
+                    }
                 }
             }
             chain.proceed()
@@ -443,7 +454,10 @@ internal class TorchIslandHooks(
             val state = dragStates.getOrPut(controller) { DragState() }
             if (state.isDragging && percentage <= 0.0f) {
                 state.draggedToZero = true
+                state.touchedZeroInGesture = true
             } else if (percentage > 0.0f) {
+                // Do not erase touchedZeroInGesture here. The off notification callback is asynchronous
+                // and may arrive after the first upward progress update.
                 state.draggedToZero = false
             }
             // Keep the \"torch is on\" bookkeeping in sync: dragging to 0 switches the torch off directly,
@@ -787,14 +801,28 @@ internal class TorchIslandHooks(
     }
 
     private fun isTorchOffByDragToZero(): Boolean {
+        val now = System.currentTimeMillis()
         synchronized(dragStates) {
-            return dragStates.values.any { it.draggedToZero }
+            var protected = false
+            dragStates.values.forEach { state ->
+                if (state.draggedToZero || state.preserveNotificationUntilMs > now) {
+                    protected = true
+                } else if (!state.isDragging) {
+                    state.touchedZeroInGesture = false
+                    state.preserveNotificationUntilMs = 0L
+                }
+            }
+            return protected
         }
     }
 
     private fun clearDragToZero() {
         synchronized(dragStates) {
-            dragStates.values.forEach { it.draggedToZero = false }
+            dragStates.values.forEach {
+                it.draggedToZero = false
+                it.touchedZeroInGesture = false
+                it.preserveNotificationUntilMs = 0L
+            }
         }
     }
 
@@ -896,6 +924,7 @@ internal class TorchIslandHooks(
         const val ACTION_TOGGLE_FLASHLIGHT = "miui.systemui.action.ACTION_TOGGLE_FLASHLIGHT"
         const val OP_CANCEL = 0
         const val OP_RESEND = 2
+        const val TORCH_GESTURE_SETTLE_MS = 900L
         const val DEFAULT_TOUCH_SLOP_PX = 24f
     }
 }
