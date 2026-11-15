@@ -2,6 +2,7 @@ package io.github.leset0ng.hypertorchisland.hook
 
 import android.content.Context
 import android.os.UserHandle
+import android.service.notification.StatusBarNotification
 import android.view.MotionEvent
 import android.view.View
 import java.lang.reflect.Field
@@ -65,6 +66,7 @@ internal data class PluginTargets(
     val saveFlashlightShowStatusMethod: Method,
     val showNotificationMethod: Method,
     val closeNotificationMethod: Method,
+    val focusCtrlAddIslandViewMethod: Method?,
     val windowViewControllerClass: Class<*>,
     val addDynamicIslandViewMethod: Method,
     val updateDynamicIslandViewMethod: Method,
@@ -106,6 +108,9 @@ internal data class PluginTargets(
     val directionDown: Any,
     val windowViewClass: Class<*>,
     val getCurrentExpandedStateMethod: Method,
+    val getCurrentBigIslandStateMethod: Method,
+    val safeguardsDelayCollapsedMethod: Method?,
+    val safeguardsWindowViewField: Field,
     val islandPropertyUpdaterClass: Class<*>,
     val containerClipRadiusMethod: Method,
     val propertyUpdaterViewField: Field,
@@ -282,6 +287,20 @@ internal object PluginTargetResolver {
         val showNotificationMethod = notifMgrClass.getDeclaredMethod("showNotification", Context::class.java)
         val closeNotificationMethod = notifMgrClass.getDeclaredMethod("closeNotification", Context::class.java)
 
+        // FocusNotificationController.addDynamicIslandView(content, sbn) reads "miui.island.firstFloat"
+        // from the notification extras and decides whether the island should expand on first show.
+        val focusCtrlAddIslandViewMethod = runCatching {
+            val focusCtrlClass = Class.forName(
+                "miui.systemui.notification.focus.FocusNotificationController",
+                false,
+                pluginLoader,
+            )
+            focusCtrlClass.declaredMethods.firstOrNull {
+                it.name == "addDynamicIslandView" && it.parameterCount == 2 &&
+                    it.parameterTypes[1] == StatusBarNotification::class.java
+            }
+        }.getOrNull()
+
         val windowViewControllerClass = Class.forName(
             "miui.systemui.dynamicisland.window.DynamicIslandWindowViewController",
             false,
@@ -413,6 +432,20 @@ internal object PluginTargetResolver {
             pluginLoader,
         )
         val getCurrentExpandedStateMethod = windowViewClass.getMethod("getCurrentExpandedState")
+        val getCurrentBigIslandStateMethod = windowViewClass.getMethod("getCurrentBigIslandState")
+
+        // Auto collapse timer: expanded islands collapse after `expandedTime` seconds unless the user
+        // interacted. The flashlight island should stay expanded while the torch is on, so we skip it.
+        val safeguardsControllerClass = Class.forName(
+            "miui.systemui.dynamicisland.window.DynamicIslandSafeguardsController",
+            false,
+            pluginLoader,
+        )
+        val safeguardsDelayCollapsedMethod = safeguardsControllerClass.declaredMethods.firstOrNull {
+            it.name == "delayCollapsed" && it.parameterCount == 1
+        }
+        val safeguardsWindowViewField = safeguardsControllerClass.getDeclaredField("windowView")
+            .apply { isAccessible = true }
 
         val propertyUpdaterClass = Class.forName(
             "miui.systemui.dynamicisland.anim.ui.animator.IslandPropertyUpdater",
@@ -480,6 +513,7 @@ internal object PluginTargetResolver {
             saveFlashlightShowStatusMethod = saveFlashlightShowStatusMethod,
             showNotificationMethod = showNotificationMethod,
             closeNotificationMethod = closeNotificationMethod,
+            focusCtrlAddIslandViewMethod = focusCtrlAddIslandViewMethod,
             windowViewControllerClass = windowViewControllerClass,
             addDynamicIslandViewMethod = addDynamicIslandViewMethod,
             updateDynamicIslandViewMethod = updateDynamicIslandViewMethod,
@@ -521,6 +555,9 @@ internal object PluginTargetResolver {
             directionDown = directionDown,
             windowViewClass = windowViewClass,
             getCurrentExpandedStateMethod = getCurrentExpandedStateMethod,
+            getCurrentBigIslandStateMethod = getCurrentBigIslandStateMethod,
+            safeguardsDelayCollapsedMethod = safeguardsDelayCollapsedMethod,
+            safeguardsWindowViewField = safeguardsWindowViewField,
             islandPropertyUpdaterClass = propertyUpdaterClass,
             containerClipRadiusMethod = containerClipRadiusMethod,
             propertyUpdaterViewField = propertyUpdaterViewField,

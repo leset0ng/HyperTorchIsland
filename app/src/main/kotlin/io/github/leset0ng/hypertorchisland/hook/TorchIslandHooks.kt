@@ -82,11 +82,12 @@ internal class TorchIslandHooks(
 
         sysTargets.handleFocusNotificationMethod?.let { handleFocusMethod ->
             hooks.install(handleFocusMethod, "sysui.flashlightCtrl.handleFocusNotification") { chain ->
-                if (isAnyTorchIslandExpanded()) {
+                if (isTorchOffByDragToZero()) {
                     val isOpen = chain.getArg(0) as Boolean
                     val op = chain.getArg(1) as Int
                     val user = chain.getArg(2)
-                    // Keep the expanded island alive while it is open (even when dragged to 0 and released).
+                    // The torch was dragged to 0 by the user: keep the expanded island so it can be dragged
+                    // back up. Turning the torch off from anywhere else still closes the island normally.
                     if (op == 0 || op == 1) {
                         return@install chain.proceed(arrayOf(isOpen, 3, user))
                     }
@@ -307,7 +308,13 @@ internal class TorchIslandHooks(
                 targets.controllerContextField.set(controller, layout.context)
                 controllerByLayout[layout] = controller
             }
-            chain.proceed()
+            val result = chain.proceed()
+            if (TorchIslandRegistry.isIslandLayout(layout)) {
+                // onStart() marks "full screen flashlight is showing". For the island that flag would make
+                // ToggleChangeReceiver ignore close requests, so the notification could never be removed.
+                clearFlashlightShowFlag(layout?.context)
+            }
+            result
         }
 
         hooks.install(targets.layoutShowViewMethod, "plugin.flashlightLayout.showView") { chain ->
@@ -368,6 +375,18 @@ internal class TorchIslandHooks(
             } else if (percentage > 0.0f) {
                 state.draggedToZero = false
             }
+            // Keep the \"torch is on\" bookkeeping in sync: dragging to 0 switches the torch off directly,
+            // and MiFlashlightController.onStop relies on this flag to drop the island notification.
+            runCatching {
+                val ctx = targets.controllerContextField.get(controller) as? Context
+                if (ctx != null) {
+                    android.provider.Settings.Global.putInt(
+                        ctx.contentResolver,
+                        "mi_flashlight_is_torch_on",
+                        if (percentage > 0.0f) 1 else 0,
+                    )
+                }
+            }.onFailure { t -> logError("Failed to sync mi_flashlight_is_torch_on", t) }
             // Always proceed so MiFlashlightManager.asyncOperate(false) turns off the real torch immediately!
             chain.proceed()
         }
@@ -417,12 +436,39 @@ internal class TorchIslandHooks(
         }
 
         hooks.install(targets.saveFlashlightShowStatusMethod, "plugin.toggleReceiver.saveShowStatus") { chain ->
-            // Only skip if at least one island layout is currently active, so full-screen MiFlashlightActivity keeps normal behavior.
+            // MiFlashlightActivity marks "full screen flashlight is showing", which makes ToggleChangeReceiver
+            // ignore notification open/close requests. While our vertical island is on screen the flag must
+            // stay false, otherwise the island notification can never be posted or closed.
             if (hostViewsByKey.values.any { it.isAttachedToWindow && it.isShown }) {
-                return@install null
+                return@install chain.proceed(arrayOf(chain.getArg(0), false))
             }
             chain.proceed()
         }
+
+        targets.focusCtrlAddIslandViewMethod?.let { addIslandViewMethod ->
+            hooks.install(addIslandViewMethod, "plugin.focusCtrl.addDynamicIslandView") { chain ->
+                val sbn = chain.getArg(1) as? StatusBarNotification
+                if (sbn != null && isFlashlightSbn(sbn)) {
+                    // The stock flashlight notification ships "islandFirstFloat": false, which keeps the
+                    // island collapsed until the user taps it. Flip it so the island expands when posted.
+                    runCatching {
+                        sbn.notification.extras?.putBoolean(EXTRA_ISLAND_FIRST_FLOAT, true)
+                        logInfo("forced islandFirstFloat=true on flashlight focus notification")
+                    }.onFailure { t -> logError("Failed to force islandFirstFloat for flashlight", t) }
+                }
+                chain.proceed()
+            }
+        } ?: logInfo("FocusNotificationController.addDynamicIslandView not found")
+
+        targets.safeguardsDelayCollapsedMethod?.let { delayCollapsedMethod ->
+            hooks.install(delayCollapsedMethod, "plugin.safeguards.delayCollapsed") { chain ->
+                if (isTorchIslandShowing(targets, chain.thisObject)) {
+                    // Keep the auto expanded flashlight island on screen instead of collapsing after 5s.
+                    return@install null
+                }
+                chain.proceed()
+            }
+        } ?: logInfo("DynamicIslandSafeguardsController.delayCollapsed not found")
 
         hooks.install(targets.showNotificationMethod, "plugin.notifMgr.showNotification") {
             // SystemUI (uid 10217) cannot post/update notifications as miui.systemui.plugin (uid 1000).
@@ -593,25 +639,36 @@ internal class TorchIslandHooks(
         return null
     }
 
+    private fun isTorchIslandShowing(targets: PluginTargets, safeguardsController: Any?): Boolean {
+        val windowView = targets.safeguardsWindowViewField.get(safeguardsController) ?: return false
+        val candidates = listOfNotNull(
+            runCatching { targets.getCurrentExpandedStateMethod.invoke(windowView) }.getOrNull(),
+            runCatching { targets.getCurrentBigIslandStateMethod.invoke(windowView) }.getOrNull(),
+        )
+        return candidates.any { contentView ->
+            val data = runCatching { targets.getCurrentIslandDataMethod.invoke(contentView) }.getOrNull()
+            isFlashlightIsland(targets, data)
+        }
+    }
+
+    private fun isFlashlightSbn(sbn: StatusBarNotification): Boolean {
+        if (sbn.packageName == PLUGIN_PKG && sbn.notification.channelId == "flashlight_channel") {
+            return true
+        }
+        val param = sbn.notification.extras?.getString("miui.focus.param")
+        if (param != null && param.contains("\"miui_flashlight\"")) {
+            return true
+        }
+        val ticker = sbn.notification.extras?.getString("miui.island.tickerData")
+        return ticker != null && ticker.contains("flash_light_icon")
+    }
+
     private fun isFlashlightIsland(targets: PluginTargets, data: Any?): Boolean {
         if (data == null) return false
         val extras = targets.dataGetExtrasMethod.invoke(data) as? Bundle ?: return false
         @Suppress("DEPRECATION")
-        val sbn = extras.getParcelable<StatusBarNotification>("miui.sbn")
-        if (sbn != null) {
-            if (sbn.packageName == PLUGIN_PKG && sbn.notification.channelId == "flashlight_channel") {
-                return true
-            }
-            val param = sbn.notification.extras?.getString("miui.focus.param")
-            if (param != null && param.contains("\"miui_flashlight\"")) {
-                return true
-            }
-            val ticker = sbn.notification.extras?.getString("miui.island.tickerData")
-            if (ticker != null && ticker.contains("flash_light_icon")) {
-                return true
-            }
-        }
-        return false
+        val sbn = extras.getParcelable<StatusBarNotification>("miui.sbn") ?: return false
+        return isFlashlightSbn(sbn)
     }
 
     private fun isTorchCurrentlyExpanded(targets: PluginTargets, interactor: Any): Boolean {
@@ -621,8 +678,16 @@ internal class TorchIslandHooks(
         return isFlashlightIsland(targets, data)
     }
 
-    private fun isAnyTorchIslandExpanded(): Boolean {
-        return hostViewsByKey.values.any { it.isAttachedToWindow && it.isShown }
+    private fun isTorchOffByDragToZero(): Boolean {
+        synchronized(dragStates) {
+            return dragStates.values.any { it.draggedToZero }
+        }
+    }
+
+    private fun clearDragToZero() {
+        synchronized(dragStates) {
+            dragStates.values.forEach { it.draggedToZero = false }
+        }
     }
 
     private fun isTorchTurnedOffForLayout(targets: PluginTargets, layout: View): Boolean {
@@ -635,13 +700,29 @@ internal class TorchIslandHooks(
         return switchStatus == false
     }
 
+    private fun clearFlashlightShowFlag(context: Context?) {
+        val ctx = context ?: return
+        runCatching {
+            android.provider.Settings.Global.putInt(ctx.contentResolver, "mi_flashlight_is_flashlight_show", 0)
+        }.onFailure { t -> logError("Failed to clear mi_flashlight_is_flashlight_show", t) }
+    }
+
     private fun sendCloseFlashlightIslandBroadcast(fallbackContext: Context) {
+        clearDragToZero()
         runCatching {
             val sysCtx = runCatching {
                 Class.forName("android.app.ActivityThread")
                     .getMethod("currentApplication")
                     .invoke(null) as? Context
             }.getOrNull() ?: fallbackContext
+            // ToggleChangeReceiver ignores close requests while this flag is set.
+            runCatching {
+                android.provider.Settings.Global.putInt(
+                    sysCtx.contentResolver,
+                    "mi_flashlight_is_flashlight_show",
+                    0,
+                )
+            }
             val intent = Intent("miui.systemui.action.ACTION_TOGGLE_FLASHLIGHT").apply {
                 setPackage(PLUGIN_PKG)
                 putExtra("flashlight_is_open_or_close", false)
@@ -695,6 +776,7 @@ internal class TorchIslandHooks(
 
     private companion object {
         const val PLUGIN_PKG = "miui.systemui.plugin"
+        const val EXTRA_ISLAND_FIRST_FLOAT = "miui.island.firstFloat"
         const val DEFAULT_TOUCH_SLOP_PX = 24f
     }
 }
