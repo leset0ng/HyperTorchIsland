@@ -17,6 +17,18 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
+    signingConfigs {
+        val keystorePath = providers.environmentVariable("TORCH_ISLAND_KEYSTORE_PATH").orNull
+        if (keystorePath != null) {
+            create("release") {
+                storeFile = file(keystorePath)
+                storePassword = providers.environmentVariable("TORCH_ISLAND_KEYSTORE_PASSWORD").get()
+                keyAlias = providers.environmentVariable("TORCH_ISLAND_KEY_ALIAS").get()
+                keyPassword = providers.environmentVariable("TORCH_ISLAND_KEY_PASSWORD").get()
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = true
@@ -25,7 +37,8 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
             )
-            signingConfig = signingConfigs.getByName("debug")
+            // Local builds without a release keystore stay installable with the debug key.
+            signingConfig = signingConfigs.findByName("release") ?: signingConfigs.getByName("debug")
         }
     }
 

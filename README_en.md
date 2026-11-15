@@ -28,7 +28,7 @@ An LSPosed module (libxposed API 102) for HyperOS that turns the flashlight Supe
 
 ## Install
 
-1. Build the APK (see below) and install it.
+1. Download the APK from [Releases](https://github.com/Xposed-Modules-Repo/io.github.leset0ng.hypertorchisland/releases) and install it, or build it yourself (see below).
 2. Enable the module in LSPosed. The scope is fixed to `com.android.systemui` (System UI).
 3. Restart System UI or reboot:
 
@@ -47,7 +47,7 @@ You need JDK 17+ and an Android SDK with platform 37.
 # app/build/outputs/apk/release/app-release.apk
 ```
 
-Release builds are minified and signed with the debug key. To override the version:
+Release builds are minified. They're signed with the keystore given by `TORCH_ISLAND_KEYSTORE_PATH`, `TORCH_ISLAND_KEYSTORE_PASSWORD`, `TORCH_ISLAND_KEY_ALIAS` and `TORCH_ISLAND_KEY_PASSWORD` when those are set, and with the debug key otherwise. To override the version:
 
 ```sh
 ./gradlew :app:assembleRelease -PtorchIslandVersionCode=2 -PtorchIslandVersionName=0.2.0

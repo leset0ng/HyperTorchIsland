@@ -28,7 +28,7 @@
 
 ## 安装
 
-1. 构建 APK（见下文）并安装。
+1. 从 [Releases](https://github.com/Xposed-Modules-Repo/io.github.leset0ng.hypertorchisland/releases) 下载 APK 并安装，或者自行构建（见下文）。
 2. 在 LSPosed 中启用模块，作用域固定为 `com.android.systemui`（系统界面）。
 3. 重启系统界面或重启手机：
 
@@ -47,7 +47,7 @@
 # app/build/outputs/apk/release/app-release.apk
 ```
 
-Release 包开启了代码压缩，使用 debug 密钥签名。指定版本号：
+Release 包开启了代码压缩。如果设置了 `TORCH_ISLAND_KEYSTORE_PATH`、`TORCH_ISLAND_KEYSTORE_PASSWORD`、`TORCH_ISLAND_KEY_ALIAS` 和 `TORCH_ISLAND_KEY_PASSWORD`，就用这个密钥签名，否则使用 debug 密钥。指定版本号：
 
 ```sh
 ./gradlew :app:assembleRelease -PtorchIslandVersionCode=2 -PtorchIslandVersionName=0.2.0

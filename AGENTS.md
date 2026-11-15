@@ -32,8 +32,10 @@ re-hyperos/                       local reverse engineering notes + decompiled e
 
 ```sh
 ./gradlew :app:assembleDebug      # compile check
-./gradlew :app:assembleRelease    # R8 minified, debug signed
+./gradlew :app:assembleRelease    # R8 minified, debug signed unless TORCH_ISLAND_KEYSTORE_* is set
 ```
+
+CI lives in `.github/workflows/`. `build.yml` runs `:app:lintRelease :app:assembleRelease` with the release key on every push to `main` and syncs `README.md` to `Xposed-Modules-Repo/io.github.leset0ng.hypertorchisland`. `release.yml` is started manually with a version, then publishes the APK to this repo's Releases and to the Xposed Modules Repo. The Gradle tasks CI runs must keep passing locally.
 
 There are no automated tests. Behavior can only be verified on a HyperOS device or emulator with LSPosed:
 
