@@ -4,6 +4,8 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.os.UserHandle
 import android.service.notification.StatusBarNotification
 import android.view.MotionEvent
@@ -39,6 +41,7 @@ internal class TorchIslandHooks(
     private var pluginTargets: PluginTargets? = null
     private val hostViewsByKey = HashMap<String, TorchIslandHostView>()
     private val fakeViewsByKey = HashMap<String, TorchIslandFakeView>()
+    private val mainHandler by lazy { Handler(Looper.getMainLooper()) }
     private val controllerByLayout = Collections.synchronizedMap(WeakHashMap<View, Any>())
     private val dragStates = Collections.synchronizedMap(WeakHashMap<Any, DragState>())
 
@@ -102,6 +105,22 @@ internal class TorchIslandHooks(
             pluginClassLoader = restoredPluginLoader
             pluginContext = restoredPluginContext
             installPluginHooks(restoredPluginLoader)
+            resendFlashlightIslandAfterReload()
+        }
+    }
+
+    private fun resendFlashlightIslandAfterReload() {
+        // The island that survived the reload still holds views built by the previous generation, so their
+        // callbacks point at the old registry and every layout hook silently bails out: the island falls back
+        // to the stock layout (horizontal seekbar + switch button). Re-posting the notification rebuilds it.
+        val context = pluginContext ?: return
+        val torchOn = runCatching {
+            android.provider.Settings.Global.getInt(context.contentResolver, SETTING_TORCH_ON, 0) == 1
+        }.getOrDefault(false)
+        if (!torchOn) return
+        mainHandler.post {
+            logInfo("re-posting flashlight notification after hot reload")
+            sendFlashlightToggleBroadcast(context, torchOn = true, operation = OP_RESEND)
         }
     }
 
@@ -225,7 +244,7 @@ internal class TorchIslandHooks(
             val top = chain.getArg(0) as Float
             val bottom = chain.getArg(1) as Float
             val maxRadius = ((bottom - top) / 2.0f).coerceAtLeast(0f)
-            val desired = TorchIslandSpecs.dpF(baseContentView.context, TorchIslandSpecs.ISLAND_CORNER_RADIUS_DP)
+            val desired = TorchIslandSpecs.cornerRadiusPx(baseContentView.context)
             minOf(maxRadius, desired)
         }
 
@@ -348,6 +367,10 @@ internal class TorchIslandHooks(
         hooks.install(targets.controllerStartMethod, "plugin.flashlightCtrl.onStart") { chain ->
             val controller = chain.thisObject
             val layout = targets.controllerLayoutField.get(controller) as? View
+            logInfo(
+                "ctrl.onStart layout=${layout?.let { System.identityHashCode(it) }} " +
+                    "registered=${TorchIslandRegistry.isIslandLayout(layout)}",
+            )
             if (TorchIslandRegistry.isIslandLayout(layout) && layout != null) {
                 targets.controllerContextField.set(controller, layout.context)
                 controllerByLayout[layout] = controller
@@ -364,6 +387,10 @@ internal class TorchIslandHooks(
         hooks.install(targets.layoutShowViewMethod, "plugin.flashlightLayout.showView") { chain ->
             val result = chain.proceed()
             val layout = chain.thisObject as? View
+            logInfo(
+                "layout.showView layout=${layout?.let { System.identityHashCode(it) }} " +
+                    "registered=${TorchIslandRegistry.isIslandLayout(layout)}",
+            )
             if (TorchIslandRegistry.isIslandLayout(layout) && layout != null) {
                 val needAnim = targets.layoutIsNeedAnimMethod.invoke(layout) as? Boolean ?: true
                 if (!needAnim) {
@@ -526,6 +553,10 @@ internal class TorchIslandHooks(
         hooks.install(targets.controllerSetSwitchLottieMethod, "plugin.flashlightCtrl.setSwitchLottie") { chain ->
             val controller = chain.thisObject
             val layout = targets.controllerLayoutField.get(controller) as? View
+            logInfo(
+                "setSwitchLottie layout=${layout?.let { System.identityHashCode(it) }} " +
+                    "registered=${TorchIslandRegistry.isIslandLayout(layout)}",
+            )
             if (!TorchIslandRegistry.isIslandLayout(layout)) {
                 return@install chain.proceed()
             }
@@ -538,6 +569,10 @@ internal class TorchIslandHooks(
         hooks.install(targets.controllerSetSeekbarMethod, "plugin.flashlightCtrl.setSeekbar") { chain ->
             val controller = chain.thisObject
             val layout = targets.controllerLayoutField.get(controller) as? View
+            logInfo(
+                "setSeekbar layout=${layout?.let { System.identityHashCode(it) }} " +
+                    "registered=${TorchIslandRegistry.isIslandLayout(layout)} supported=${chain.getArg(0)}",
+            )
             if (!TorchIslandRegistry.isIslandLayout(layout)) {
                 return@install chain.proceed()
             }
@@ -612,9 +647,12 @@ internal class TorchIslandHooks(
             createFlashlightLayout = { context ->
                 val manager = PluginTargetResolver.resolveFlashlightManager(targets)
                     ?: error("MiFlashlightManager unavailable in PluginComponent")
-                targets.getMiFlashlightLayoutMethod.invoke(manager, context, false) as View
+                val layout = targets.getMiFlashlightLayoutMethod.invoke(manager, context, false) as View
+                logInfo("created MiFlashlightLayout hash=${System.identityHashCode(layout)}")
+                layout
             },
             dismissFlashlightLayout = { layoutHash ->
+                logInfo("dismiss MiFlashlightLayout hash=$layoutHash")
                 val manager = PluginTargetResolver.resolveFlashlightManager(targets)
                 if (manager != null) {
                     targets.dismissMethod.invoke(manager, layoutHash)
@@ -793,15 +831,22 @@ internal class TorchIslandHooks(
                     0,
                 )
             }
-            val intent = Intent("miui.systemui.action.ACTION_TOGGLE_FLASHLIGHT").apply {
-                setPackage(PLUGIN_PKG)
-                putExtra("flashlight_is_open_or_close", false)
-                putExtra("notification_operation", 0)
-            }
-            sysCtx.sendBroadcast(intent)
+            sendFlashlightToggleBroadcast(sysCtx, torchOn = false, operation = OP_CANCEL)
+            Unit
         }.onFailure { t ->
             logError("Failed to close flashlight island notification on collapse while torch off", t)
         }
+    }
+
+    private fun sendFlashlightToggleBroadcast(context: Context, torchOn: Boolean, operation: Int) {
+        runCatching {
+            val intent = Intent(ACTION_TOGGLE_FLASHLIGHT).apply {
+                setPackage(PLUGIN_PKG)
+                putExtra("flashlight_is_open_or_close", torchOn)
+                putExtra("notification_operation", operation)
+            }
+            context.sendBroadcast(intent)
+        }.onFailure { t -> logError("Failed to send flashlight toggle broadcast", t) }
     }
 
     private fun resetLatestExpandedPress(targets: PluginTargets) {
@@ -847,6 +892,10 @@ internal class TorchIslandHooks(
     private companion object {
         const val PLUGIN_PKG = "miui.systemui.plugin"
         const val EXTRA_ISLAND_FIRST_FLOAT = "miui.island.firstFloat"
+        const val SETTING_TORCH_ON = "mi_flashlight_is_torch_on"
+        const val ACTION_TOGGLE_FLASHLIGHT = "miui.systemui.action.ACTION_TOGGLE_FLASHLIGHT"
+        const val OP_CANCEL = 0
+        const val OP_RESEND = 2
         const val DEFAULT_TOUCH_SLOP_PX = 24f
     }
 }

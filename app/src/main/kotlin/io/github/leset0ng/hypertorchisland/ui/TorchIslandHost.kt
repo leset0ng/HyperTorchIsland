@@ -21,7 +21,28 @@ import java.util.WeakHashMap
 internal object TorchIslandSpecs {
     const val ISLAND_WIDTH_DP = 216f
     const val ISLAND_HEIGHT_DP = 292f
-    const val ISLAND_CORNER_RADIUS_DP = 42f
+
+    private const val PLUGIN_PKG = "miui.systemui.plugin"
+    private const val ISLAND_RADIUS_RES = "island_radius"
+    private const val ISLAND_RADIUS_FALLBACK_DP = 30f
+
+    @Volatile
+    private var cachedCornerRadiusPx = 0f
+
+    // DynamicIslandBackgroundView paints the island outline from a shape drawable whose corner radius is
+    // @dimen/island_radius (30dp). Clipping the content to a larger radius lets that 12% white stroke show
+    // through at the corners, so the content has to reuse the exact same radius instead.
+    fun cornerRadiusPx(context: Context): Float {
+        cachedCornerRadiusPx.takeIf { it > 0f }?.let { return it }
+        val resolved = runCatching {
+            val id = context.resources.getIdentifier(ISLAND_RADIUS_RES, "dimen", PLUGIN_PKG)
+            if (id == 0) return@runCatching 0f
+            context.resources.getDimension(id)
+        }.getOrDefault(0f)
+        val radius = if (resolved > 0f) resolved else dpF(context, ISLAND_RADIUS_FALLBACK_DP)
+        cachedCornerRadiusPx = radius
+        return radius
+    }
 
     const val SEEKBAR_WIDTH_DP = 7f
     const val SEEKBAR_HEIGHT_DP = 108f
@@ -93,7 +114,7 @@ internal class TorchIslandHostView(
     private val mainHandler = Handler(Looper.getMainLooper())
     private val targetWidthPx = TorchIslandSpecs.dp(pluginContext, TorchIslandSpecs.ISLAND_WIDTH_DP)
     private val targetHeightPx = TorchIslandSpecs.dp(pluginContext, TorchIslandSpecs.ISLAND_HEIGHT_DP)
-    private val cornerRadiusPx = TorchIslandSpecs.dpF(pluginContext, TorchIslandSpecs.ISLAND_CORNER_RADIUS_DP)
+    private val cornerRadiusPx = TorchIslandSpecs.cornerRadiusPx(pluginContext)
 
     private var activeFlashlightLayout: View? = null
     private var collapseNotifiedForCurrentAttach = false
@@ -226,7 +247,7 @@ internal class TorchIslandFakeView(
 
     private val targetWidthPx = TorchIslandSpecs.dp(pluginContext, TorchIslandSpecs.ISLAND_WIDTH_DP)
     private val targetHeightPx = TorchIslandSpecs.dp(pluginContext, TorchIslandSpecs.ISLAND_HEIGHT_DP)
-    private val cornerRadiusPx = TorchIslandSpecs.dpF(pluginContext, TorchIslandSpecs.ISLAND_CORNER_RADIUS_DP)
+    private val cornerRadiusPx = TorchIslandSpecs.cornerRadiusPx(pluginContext)
 
     init {
         layoutParams = LayoutParams(targetWidthPx, targetHeightPx, Gravity.CENTER_HORIZONTAL)
